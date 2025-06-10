@@ -1,1 +1,1 @@
-web: cd server && gunicorn run_server:app 
+web: gunicorn "app:app" --log-file - 

@@ -1,80 +1,64 @@
 # WerTigo Trip Planner - Python Backend
 
-This repository contains the Python Flask backend for the WerTigo Trip Planner application, providing AI recommendations, geocoding, and route calculation services.
+AI Recommendations, Geocoding, and Route Calculation Service for WerTigo Trip Planner.
 
 ## Deployment to Railway
 
 ### Prerequisites
-- A Railway account (https://railway.app/)
-- Railway CLI installed (optional)
+- A Railway account
+- Railway CLI (optional)
 
-### Deployment Steps
+### Steps to Deploy
 
-1. **Sign up for Railway**
-   - Go to [Railway.app](https://railway.app/) and sign up for an account
-
-2. **Deploy from the Web Interface**
-   - Log into Railway dashboard
-   - Click "New Project" button
+1. **Via Railway Dashboard (Browser)**
+   - Log in to your Railway account
+   - Create a new project
    - Select "Deploy from GitHub"
-   - Connect your GitHub account and select this repository
-   - Railway will automatically detect the Procfile and deploy the application
+   - Connect your GitHub repository
+   - Configure environment variables using the values from `.env` or `env.example`
+   - Railway will automatically detect the Procfile and deploy your application
 
-3. **Configure Environment Variables**
-   - In your Railway project dashboard, go to the "Variables" tab
-   - Add the following environment variables:
-     ```
-     FLASK_ENV=production
-     FLASK_DEBUG=0
-     SECRET_KEY=your_secret_key_here
-     FRONTEND_URL=your_frontend_url
-     ```
-
-4. **Access Your Deployed App**
-   - Once deployed, Railway will provide you with a URL to access your application
-   - Your API will be available at this URL
-   - Example endpoints:
-     - Health check: `https://your-app-url.up.railway.app/api/health`
-     - Get cities: `https://your-app-url.up.railway.app/api/cities`
-
-## Manual Deployment Using CLI
-
-If you prefer to deploy using the Railway CLI:
-
-1. **Install the Railway CLI**
-   ```
+2. **Via Railway CLI**
+   ```bash
+   # Install Railway CLI if not installed
    npm i -g @railway/cli
-   ```
 
-2. **Login to Railway**
-   ```
+   # Login to Railway
    railway login
-   ```
 
-3. **Link to your project**
-   ```
+   # Initialize the project in the current directory
+   railway init
+
+   # Link to an existing project (if you created one via dashboard)
    railway link
-   ```
 
-4. **Deploy your application**
-   ```
+   # Deploy the application
    railway up
    ```
 
+3. **Environment Variables**
+   Make sure to set these in Railway dashboard:
+   - `FLASK_ENV`
+   - `FLASK_DEBUG`
+   - `SECRET_KEY`
+   - `SESSION_LIFETIME_DAYS`
+   - `FRONTEND_URL`
+   - `PYTHON_BACKEND_URL` (set to your Railway app URL after deployment)
+
 ## Local Development
 
-To run the application locally:
+1. Copy `env.example` to `.env`
+2. Install dependencies: `pip install -r requirements.txt`
+3. Run the server: `python run_server.py`
 
-1. **Install dependencies**
-   ```
-   cd server
-   pip install -r requirements.txt
-   ```
+## API Endpoints
 
-2. **Run the server**
-   ```
-   cd server
-   python run_server.py
-   ```
-
-The API will be available at `http://localhost:5000`. 
+- GET  /api/health          - Health check
+- POST /api/create-session  - Create session
+- POST /api/recommend       - Get AI recommendations
+- GET  /api/cities          - Get available cities
+- GET  /api/categories      - Get available categories
+- GET  /api/geocode         - Geocode locations
+- POST /api/route           - Route calculation
+- POST /api/model/chat      - Neural model chat
+- GET  /api/model/status    - Model status 

@@ -8,20 +8,21 @@ import os
 import sys
 from app import app, init_recommendation_engine
 
-# Initialize the recommendation engine at startup
-try:
-    init_recommendation_engine()
-    print("✅ Recommendation engine initialized successfully!")
-except Exception as e:
-    print(f"❌ Failed to initialize recommendation engine: {e}")
-    print("⚠️  Server will start but recommendations may not work properly.")
-
 def main():
     """Main function to run the server"""
     print("=" * 60)
     print("🌟 WerTigo Trip Planner - Python Backend Server")
     print("🤖 AI Recommendations & Route Calculation Service")
     print("=" * 60)
+    
+    # Initialize the recommendation engine
+    print("📊 Initializing AI recommendation engine...")
+    try:
+        init_recommendation_engine()
+        print("✅ Recommendation engine initialized successfully!")
+    except Exception as e:
+        print(f"❌ Failed to initialize recommendation engine: {e}")
+        print("⚠️  Server will start but recommendations may not work properly.")
     
     # Server configuration
     host = os.environ.get('HOST', '0.0.0.0')
@@ -46,6 +47,8 @@ def main():
     print("   • Reviews & Ratings")
     print("   • Trip Sharing & Trackers")
     print("\n💡 Frontend should connect to both backends:")
+    print("   • Python (AI): http://localhost:5000")
+    print("   • Express (Auth/Data): http://localhost:3001")
     print("=" * 60)
     
     try:
