@@ -1,0 +1,1 @@
+web: cd server && gunicorn run_server:app 
