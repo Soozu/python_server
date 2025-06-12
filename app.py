@@ -37,13 +37,24 @@ print(f"Loaded OpenRouteService API Key: {ors_api_key[:5]}... (length: {len(ors_
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'wertigo_trip_planner_secret_key_2024')
 
-# CORS configuration for Render deployment
+# Session configuration for production
+app.config.update(
+    SESSION_COOKIE_SECURE=True if os.getenv('NODE_ENV') == 'production' else False,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='None' if os.getenv('NODE_ENV') == 'production' else 'Lax',
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=24)
+)
+
+# CORS configuration for production deployment
 cors_origins = [
     os.getenv('FRONTEND_URL', 'https://wertigo.netlify.app'),
     os.getenv('EXPRESS_BACKEND_URL', 'http://localhost:3001'),
+    'https://wertigo.netlify.app',
+    'https://wertigo.netlify.app/',
     'http://localhost:3000',
     'http://localhost:3001',
-    'http://localhost:5000'
+    'http://localhost:5000',
+    'http://localhost:5173'
 ]
 
 CORS(app, 
@@ -606,50 +617,6 @@ def get_graphhopper_route(points):
                 logger.warning(f"No paths found in GraphHopper response: {data}")
         else:
             logger.warning(f"GraphHopper API returned status {response.status_code}: {response.text}")
-            
-            # Try alternative approach with separate requests for each segment
-            if len(points) > 2:
-                try:
-                    logger.info("Trying alternative approach with segment-by-segment requests")
-                    
-                    all_route_points = []
-                    total_distance = 0
-                    total_time = 0
-                    
-                    for i in range(len(points) - 1):
-                        segment_url = f"{gh_url}?key={api_key}"
-                        segment_url += f"&point={points[i]['lat']},{points[i]['lng']}"
-                        segment_url += f"&point={points[i+1]['lat']},{points[i+1]['lng']}"
-                        segment_url += "&vehicle=car&locale=en&instructions=false&points_encoded=false"
-                        
-                        segment_response = requests.get(segment_url, timeout=15)
-                        
-                        if segment_response.status_code == 200:
-                            segment_data = segment_response.json()
-                            
-                            if 'paths' in segment_data and len(segment_data['paths']) > 0:
-                                segment_path = segment_data['paths'][0]
-                                
-                                if 'points' in segment_path and 'coordinates' in segment_path['points']:
-                                    segment_points = segment_path['points']['coordinates']
-                                    
-                                    if i > 0 and all_route_points:
-                                        all_route_points.extend(segment_points[1:])
-                                    else:
-                                        all_route_points.extend(segment_points)
-                                    
-                                    total_distance += segment_path['distance']
-                                    total_time += segment_path['time']
-                    
-                    if all_route_points:
-                        return {
-                            'distance_km': round(total_distance / 1000, 2),
-                            'time_min': round(total_time / 60000, 0),
-                            'points': all_route_points,
-                            'source': 'graphhopper'
-                        }
-                except Exception as segment_error:
-                    logger.error(f"Error in segment-by-segment approach: {str(segment_error)}")
     
     except Exception as e:
         logger.error(f"Error calling GraphHopper API: {str(e)}")
@@ -670,13 +637,11 @@ def calculate_direct_route(points):
         route_points.append([lng1, lat1])
         
         # For longer segments, add a midpoint to make the route look better
-        if calculate_distance(lat1, lng1, lat2, lng2) > 50:  # If over 50km
+        distance = calculate_distance(lat1, lng1, lat2, lng2)
+        if distance > 50:  # If over 50km
             mid_lat = (lat1 + lat2) / 2
             mid_lng = (lng1 + lng2) / 2
             route_points.append([mid_lng, mid_lat])
-        
-        # Haversine formula for distance
-        distance = calculate_distance(lat1, lng1, lat2, lng2)
         
         total_distance += distance
         total_time += distance * 2  # Rough estimate: 2 minutes per km
