@@ -24,14 +24,14 @@ ors_api_key = os.getenv('ORS_URL_API', '')
 print(f"Loaded OpenRouteService API Key: {ors_api_key[:5]}... (length: {len(ors_api_key)})")
 
 # Disable heavy ML imports for memory optimization
-import torch
-from model import (
-    DestinationRecommender, 
-    load_data, 
-    preprocess_data,
-    extract_query_info,
-    get_recommendations as model_get_recommendations
-)
+# import torch
+# from model import (
+#     DestinationRecommender, 
+#     load_data, 
+#     preprocess_data,
+#     extract_query_info,
+#     get_recommendations as model_get_recommendations
+# )
 
 # Initialize Flask app
 app = Flask(__name__)
