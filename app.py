@@ -19,15 +19,19 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Print loaded environment variables for debugging
+ors_api_key = os.getenv('ORS_URL_API', '')
+print(f"Loaded OpenRouteService API Key: {ors_api_key[:5]}... (length: {len(ors_api_key)})")
+
 # Disable heavy ML imports for memory optimization
-# import torch
-# from model import (
-#     DestinationRecommender, 
-#     load_data, 
-#     preprocess_data,
-#     extract_query_info,
-#     get_recommendations as model_get_recommendations
-# )
+import torch
+from model import (
+    DestinationRecommender, 
+    load_data, 
+    preprocess_data,
+    extract_query_info,
+    get_recommendations as model_get_recommendations
+)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -502,7 +506,7 @@ def geocode():
 
 @app.route('/api/route', methods=['POST'])
 def calculate_route():
-    """Calculate route between destinations using OpenRouteService"""
+    """Calculate route between destinations using GraphHopper API"""
     try:
         data = request.get_json()
         points = data.get('points', [])
@@ -510,272 +514,212 @@ def calculate_route():
         if len(points) < 2:
             return jsonify({'error': 'At least 2 points required'}), 400
         
-        route_data = None
-        
-        # Try to get route from OpenRouteService first
+        # Try to get route from GraphHopper API with token
         try:
-            route_data = get_road_route(points)
-            if route_data:
-                return jsonify(route_data)
+            gh_result = get_graphhopper_route(points)
+            if gh_result:
+                return jsonify(gh_result)
         except Exception as e:
-            logger.warning(f"OpenRouteService failed, falling back to simple routing: {e}")
+            logger.warning(f"GraphHopper API failed, falling back to direct routing: {e}")
         
-        # Fallback to simple routing if ORS fails
-        total_distance = 0
-        total_time = 0
-        route_points = []
-        
-        for i in range(len(points) - 1):
-            lat1, lng1 = points[i]['lat'], points[i]['lng']
-            lat2, lng2 = points[i + 1]['lat'], points[i + 1]['lng']
-            
-            # Haversine formula for distance
-            from math import radians, cos, sin, asin, sqrt
-            
-            # Convert to radians
-            lat1, lng1, lat2, lng2 = map(radians, [lat1, lng1, lat2, lng2])
-            
-            # Haversine formula
-            dlng = lng2 - lng1
-            dlat = lat2 - lat1
-            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlng/2)**2
-            c = 2 * asin(sqrt(a))
-            r = 6371 # Radius of earth in kilometers
-            distance = c * r
-            
-            total_distance += distance
-            total_time += distance * 2  # Rough estimate: 2 minutes per km
-            
-            # Create intermediate points for a more curved route (avoiding straight lines through water)
-            intermediate_points = create_curved_route(lat1, lng1, lat2, lng2)
-            route_points.extend(intermediate_points)
-        
-        route_data = {
-            'distance_km': round(total_distance, 2),
-            'time_min': round(total_time, 0),
-            'points': route_points,
-            'fallback': True
-        }
-        
-        return jsonify(route_data)
+        # Fallback to direct routing if GraphHopper fails
+        return calculate_direct_route(points)
         
     except Exception as e:
         logger.error(f"Error calculating route: {e}")
         return jsonify({'error': 'Failed to calculate route'}), 500
 
-def get_road_route(points):
-    """Get actual road route using OpenRouteService API"""
+def get_graphhopper_route(points):
+    """Get route from GraphHopper using API token"""
     import requests
     
-    # Try OpenRouteService first
+    # Get API token from environment variables or use the provided one
+    api_key = os.getenv('GRAPHHOPPER_API_KEY', 'efe50280-c16b-4da6-8ddb-0e56da129ebf').strip()
+    
+    # GraphHopper API endpoint
+    gh_url = "https://graphhopper.com/api/1/route"
+    
     try:
-        ors_result = get_ors_route(points)
-        if ors_result:
-            return ors_result
+        # Prepare points for GraphHopper API format
+        point_params = []
+        for point in points:
+            point_params.append(f"{point['lat']},{point['lng']}")
+        
+        # Build the URL with points manually
+        request_url = f"{gh_url}?key={api_key}"
+        for point in point_params:
+            request_url += f"&point={point}"
+        
+        # Add other parameters
+        params = {
+            'vehicle': 'car',
+            'locale': 'en',
+            'instructions': 'true',
+            'points_encoded': 'false',
+            'elevation': 'false'
+        }
+        
+        for key, value in params.items():
+            request_url += f"&{key}={value}"
+        
+        logger.info(f"Making request to GraphHopper API with {len(point_params)} points")
+        logger.info(f"GraphHopper request URL: {request_url[:100]}...")
+        
+        # Make the request
+        response = requests.get(request_url, timeout=20)
+        logger.info(f"GraphHopper API response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            logger.info(f"GraphHopper API response sample: {str(data)[:200]}...")
+            
+            if 'paths' in data and len(data['paths']) > 0:
+                path = data['paths'][0]
+                
+                if 'points' in path and 'coordinates' in path['points']:
+                    route_points = path['points']['coordinates']
+                    logger.info(f"Received {len(route_points)} route points from GraphHopper API")
+                    
+                    distance_km = round(path['distance'] / 1000, 2)
+                    duration_min = round(path['time'] / 60000, 0)
+                    
+                    steps = []
+                    if 'instructions' in path:
+                        for instruction in path['instructions']:
+                            steps.append({
+                                'instruction': instruction.get('text', ''),
+                                'distance': instruction.get('distance', 0),
+                                'duration': instruction.get('time', 0) / 1000,
+                                'street_name': instruction.get('street_name', '')
+                            })
+                    
+                    return {
+                        'distance_km': distance_km,
+                        'time_min': duration_min,
+                        'points': route_points,
+                        'source': 'graphhopper',
+                        'steps': steps if steps else None
+                    }
+                else:
+                    logger.warning("No coordinates found in GraphHopper response")
+            else:
+                logger.warning(f"No paths found in GraphHopper response: {data}")
+        else:
+            logger.warning(f"GraphHopper API returned status {response.status_code}: {response.text}")
+            
+            # Try alternative approach with separate requests for each segment
+            if len(points) > 2:
+                try:
+                    logger.info("Trying alternative approach with segment-by-segment requests")
+                    
+                    all_route_points = []
+                    total_distance = 0
+                    total_time = 0
+                    
+                    for i in range(len(points) - 1):
+                        segment_url = f"{gh_url}?key={api_key}"
+                        segment_url += f"&point={points[i]['lat']},{points[i]['lng']}"
+                        segment_url += f"&point={points[i+1]['lat']},{points[i+1]['lng']}"
+                        segment_url += "&vehicle=car&locale=en&instructions=false&points_encoded=false"
+                        
+                        segment_response = requests.get(segment_url, timeout=15)
+                        
+                        if segment_response.status_code == 200:
+                            segment_data = segment_response.json()
+                            
+                            if 'paths' in segment_data and len(segment_data['paths']) > 0:
+                                segment_path = segment_data['paths'][0]
+                                
+                                if 'points' in segment_path and 'coordinates' in segment_path['points']:
+                                    segment_points = segment_path['points']['coordinates']
+                                    
+                                    if i > 0 and all_route_points:
+                                        all_route_points.extend(segment_points[1:])
+                                    else:
+                                        all_route_points.extend(segment_points)
+                                    
+                                    total_distance += segment_path['distance']
+                                    total_time += segment_path['time']
+                    
+                    if all_route_points:
+                        return {
+                            'distance_km': round(total_distance / 1000, 2),
+                            'time_min': round(total_time / 60000, 0),
+                            'points': all_route_points,
+                            'source': 'graphhopper'
+                        }
+                except Exception as segment_error:
+                    logger.error(f"Error in segment-by-segment approach: {str(segment_error)}")
+    
     except Exception as e:
-        logger.warning(f"OpenRouteService failed: {e}")
-    
-    # Try OSRM as fallback
-    try:
-        osrm_result = get_osrm_route(points)
-        if osrm_result:
-            return osrm_result
-    except Exception as e:
-        logger.warning(f"OSRM failed: {e}")
+        logger.error(f"Error calling GraphHopper API: {str(e)}")
     
     return None
 
-def get_ors_route(points):
-    """Get route from OpenRouteService"""
-    import requests
+def calculate_direct_route(points):
+    """Calculate a direct route between points as fallback"""
+    total_distance = 0
+    total_time = 0
+    route_points = []
     
-    # OpenRouteService API endpoint (free tier)
-    ors_url = "https://api.openrouteservice.org/v2/directions/driving-car"
-    
-    headers = {
-        'Accept': 'application/json, application/geo+json, application/gpx+xml, img/png; charset=utf-8',
-        'Content-Type': 'application/json; charset=utf-8'
-    }
-    
-    # Format coordinates for ORS (longitude, latitude)
-    coordinates = [[point['lng'], point['lat']] for point in points]
-    
-    body = {
-        "coordinates": coordinates,
-        "format": "geojson",
-        "instructions": False,
-        "geometry_simplify": False
-    }
-    
-    response = requests.post(ors_url, json=body, headers=headers, timeout=10)
-    
-    if response.status_code == 200:
-        data = response.json()
+    for i in range(len(points) - 1):
+        lat1, lng1 = points[i]['lat'], points[i]['lng']
+        lat2, lng2 = points[i + 1]['lat'], points[i + 1]['lng']
         
-        if 'features' in data and len(data['features']) > 0:
-            feature = data['features'][0]
-            geometry = feature['geometry']
-            properties = feature['properties']
-            
-            # Extract route points (already in [lng, lat] format)
-            route_points = geometry['coordinates']
-            
-            # Get distance and duration from properties
-            distance_km = round(properties['segments'][0]['distance'] / 1000, 2)
-            duration_min = round(properties['segments'][0]['duration'] / 60, 0)
-            
-            return {
-                'distance_km': distance_km,
-                'time_min': duration_min,
-                'points': route_points,
-                'source': 'openrouteservice'
-            }
-    else:
-        logger.warning(f"ORS API returned status {response.status_code}: {response.text}")
+        # Add starting point
+        route_points.append([lng1, lat1])
+        
+        # For longer segments, add a midpoint to make the route look better
+        if calculate_distance(lat1, lng1, lat2, lng2) > 50:  # If over 50km
+            mid_lat = (lat1 + lat2) / 2
+            mid_lng = (lng1 + lng2) / 2
+            route_points.append([mid_lng, mid_lat])
+        
+        # Haversine formula for distance
+        distance = calculate_distance(lat1, lng1, lat2, lng2)
+        
+        total_distance += distance
+        total_time += distance * 2  # Rough estimate: 2 minutes per km
+        
+        # Add ending point
+        route_points.append([lng2, lat2])
     
-    return None
+    route_data = {
+        'distance_km': round(total_distance, 2),
+        'time_min': round(total_time, 0),
+        'points': route_points,
+        'source': 'direct'
+    }
+    
+    # Enhance route with travel time information
+    if total_distance > 0:
+        # Calculate estimated travel times based on typical speeds
+        if total_distance <= 5:  # Short urban distance
+            route_data['time_min'] = round(total_distance * 3, 0)  # 20 km/h (3 min/km)
+        elif total_distance <= 20:  # Medium urban/suburban
+            route_data['time_min'] = round(total_distance * 1.5, 0)  # 40 km/h (1.5 min/km)
+        elif total_distance <= 100:  # Highway/intercity
+            route_data['time_min'] = round(total_distance * 0.75, 0)  # 80 km/h (0.75 min/km)
+        else:  # Long distance
+            route_data['time_min'] = round(total_distance * 0.6, 0)  # 100 km/h (0.6 min/km)
+    
+    return jsonify(route_data)
 
-def get_osrm_route(points):
-    """Get route from OSRM demo server"""
-    import requests
+def calculate_distance(lat1, lng1, lat2, lng2):
+    """Calculate distance between two points using Haversine formula"""
+    from math import radians, cos, sin, asin, sqrt
     
-    # OSRM demo server
-    osrm_url = "http://router.project-osrm.org/route/v1/driving"
+    # Convert to radians
+    lat1_rad, lng1_rad, lat2_rad, lng2_rad = map(radians, [lat1, lng1, lat2, lng2])
     
-    # Format coordinates for OSRM (longitude,latitude)
-    coordinates_str = ";".join([f"{point['lng']},{point['lat']}" for point in points])
+    # Haversine formula
+    dlng = lng2_rad - lng1_rad
+    dlat = lat2_rad - lat1_rad
+    a = sin(dlat/2)**2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlng/2)**2
+    c = 2 * asin(sqrt(a))
+    r = 6371  # Radius of earth in kilometers
     
-    # Build URL with parameters
-    url = f"{osrm_url}/{coordinates_str}"
-    params = {
-        'overview': 'full',
-        'geometries': 'geojson',
-        'steps': 'false'
-    }
-    
-    response = requests.get(url, params=params, timeout=10)
-    
-    if response.status_code == 200:
-        data = response.json()
-        
-        if data.get('code') == 'Ok' and 'routes' in data and len(data['routes']) > 0:
-            route = data['routes'][0]
-            geometry = route['geometry']
-            
-            # Extract route points (already in [lng, lat] format)
-            route_points = geometry['coordinates']
-            
-            # Get distance and duration
-            distance_km = round(route['distance'] / 1000, 2)
-            duration_min = round(route['duration'] / 60, 0)
-            
-            return {
-                'distance_km': distance_km,
-                'time_min': duration_min,
-                'points': route_points,
-                'source': 'osrm'
-            }
-    else:
-        logger.warning(f"OSRM API returned status {response.status_code}: {response.text}")
-    
-    return None
-
-def create_curved_route(lat1, lng1, lat2, lng2):
-    """Create a curved route between two points to avoid straight lines through water"""
-    # Convert back to degrees
-    lat1, lng1, lat2, lng2 = map(math.degrees, [lat1, lng1, lat2, lng2])
-    
-    # Calculate midpoint
-    mid_lat = (lat1 + lat2) / 2
-    mid_lng = (lng1 + lng2) / 2
-    
-    # Determine the best curve direction based on Philippine geography
-    curve_offset = calculate_curve_offset(lat1, lng1, lat2, lng2)
-    
-    # Apply the curve offset
-    curve_lat = mid_lat + curve_offset['lat']
-    curve_lng = mid_lng + curve_offset['lng']
-    
-    # Create intermediate points using Bezier curve
-    points = []
-    num_segments = 8  # More segments for smoother curve
-    
-    for i in range(num_segments + 1):
-        t = i / num_segments
-        
-        # Quadratic Bezier curve
-        lat = (1-t)**2 * lat1 + 2*(1-t)*t * curve_lat + t**2 * lat2
-        lng = (1-t)**2 * lng1 + 2*(1-t)*t * curve_lng + t**2 * lng2
-        
-        points.append([lng, lat])
-    
-    return points
-
-def calculate_curve_offset(lat1, lng1, lat2, lng2):
-    """Calculate intelligent curve offset based on Philippine geography"""
-    
-    # Define major water bodies and their approximate boundaries
-    water_bodies = {
-        'manila_bay': {'lat_range': (14.4, 14.8), 'lng_range': (120.8, 121.1)},
-        'laguna_de_bay': {'lat_range': (14.2, 14.5), 'lng_range': (121.0, 121.4)},
-        'south_china_sea': {'lat_range': (10.0, 20.0), 'lng_range': (115.0, 120.0)},
-        'philippine_sea': {'lat_range': (10.0, 20.0), 'lng_range': (125.0, 135.0)},
-        'sulu_sea': {'lat_range': (5.0, 10.0), 'lng_range': (118.0, 122.0)},
-        'celebes_sea': {'lat_range': (3.0, 8.0), 'lng_range': (118.0, 125.0)}
-    }
-    
-    # Calculate midpoint
-    mid_lat = (lat1 + lat2) / 2
-    mid_lng = (lng1 + lng2) / 2
-    
-    # Default curve offset
-    base_offset = 0.02
-    
-    # Check if route crosses major water bodies
-    curve_lat_offset = 0
-    curve_lng_offset = 0
-    
-    # Manila Bay area - curve around the bay
-    if (14.4 <= mid_lat <= 14.8 and 120.8 <= mid_lng <= 121.1):
-        if lat1 < lat2:  # Going north
-            curve_lng_offset = base_offset  # Curve east around the bay
-        else:  # Going south
-            curve_lng_offset = -base_offset  # Curve west around the bay
-    
-    # Laguna de Bay area - curve around the lake
-    elif (14.2 <= mid_lat <= 14.5 and 121.0 <= mid_lng <= 121.4):
-        if lng1 < lng2:  # Going east
-            curve_lat_offset = base_offset  # Curve north around the lake
-        else:  # Going west
-            curve_lat_offset = -base_offset  # Curve south around the lake
-    
-    # Inter-island routes - curve towards major land masses
-    elif abs(lat2 - lat1) > 2 or abs(lng2 - lng1) > 2:  # Long distance route
-        # For Luzon to Visayas routes
-        if lat1 > 15 and lat2 < 12:  # Luzon to Mindanao/Visayas
-            curve_lng_offset = base_offset * 2  # Curve east towards land
-        elif lat1 < 12 and lat2 > 15:  # Mindanao/Visayas to Luzon
-            curve_lng_offset = base_offset * 2  # Curve east towards land
-        
-        # For east-west routes
-        elif abs(lng2 - lng1) > abs(lat2 - lat1):
-            if mid_lat > 12:  # Northern Philippines
-                curve_lat_offset = base_offset  # Curve north towards land
-            else:  # Southern Philippines
-                curve_lat_offset = -base_offset  # Curve south towards land
-    
-    # Default behavior for shorter routes
-    else:
-        # Small curve to avoid perfectly straight lines
-        if abs(lng2 - lng1) > abs(lat2 - lat1):  # More east-west movement
-            curve_lat_offset = base_offset * 0.5
-        else:  # More north-south movement
-            curve_lng_offset = base_offset * 0.5
-    
-    return {
-        'lat': curve_lat_offset,
-        'lng': curve_lng_offset
-    }
+    return c * r
 
 def init_neural_model():
     """Initialize the neural recommendation model"""
