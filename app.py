@@ -38,23 +38,20 @@ app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'wertigo_trip_planner_secret_key_2024')
 
 # Session configuration for production
-app.config.update(
-    SESSION_COOKIE_SECURE=True if os.getenv('NODE_ENV') == 'production' else False,
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='None' if os.getenv('NODE_ENV') == 'production' else 'Lax',
-    PERMANENT_SESSION_LIFETIME=timedelta(hours=24)
-)
+app.config['SESSION_COOKIE_SECURE'] = True  # HTTPS only
+app.config['SESSION_COOKIE_HTTPONLY'] = True  # No JS access
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'  # Cross-domain
+app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24 hours
 
-# CORS configuration for production deployment
+# CORS configuration for Railway/Netlify deployment
 cors_origins = [
     os.getenv('FRONTEND_URL', 'https://wertigo.netlify.app'),
     os.getenv('EXPRESS_BACKEND_URL', 'http://localhost:3001'),
     'https://wertigo.netlify.app',
-    'https://wertigo.netlify.app/',
+    'https://express-server-production-5cf6.up.railway.app',
     'http://localhost:3000',
     'http://localhost:3001',
-    'http://localhost:5000',
-    'http://localhost:5173'
+    'http://localhost:5000'
 ]
 
 CORS(app, 
@@ -520,25 +517,44 @@ def calculate_route():
     """Calculate route between destinations using GraphHopper API"""
     try:
         data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'Invalid JSON data'}), 400
+            
         points = data.get('points', [])
         
-        if len(points) < 2:
+        if not points or len(points) < 2:
             return jsonify({'error': 'At least 2 points required'}), 400
+        
+        # Validate point format
+        for i, point in enumerate(points):
+            if not isinstance(point, dict) or 'lat' not in point or 'lng' not in point:
+                return jsonify({'error': f'Invalid point format at index {i}. Expected {{lat: number, lng: number}}'}), 400
+            
+            try:
+                float(point['lat'])
+                float(point['lng'])
+            except (ValueError, TypeError):
+                return jsonify({'error': f'Invalid coordinates at point {i}. Lat and lng must be numbers'}), 400
+        
+        logger.info(f"Calculating route for {len(points)} points")
         
         # Try to get route from GraphHopper API with token
         try:
             gh_result = get_graphhopper_route(points)
             if gh_result:
+                logger.info("Successfully got route from GraphHopper API")
                 return jsonify(gh_result)
         except Exception as e:
             logger.warning(f"GraphHopper API failed, falling back to direct routing: {e}")
         
         # Fallback to direct routing if GraphHopper fails
+        logger.info("Using direct route calculation as fallback")
         return calculate_direct_route(points)
         
     except Exception as e:
         logger.error(f"Error calculating route: {e}")
-        return jsonify({'error': 'Failed to calculate route'}), 500
+        return jsonify({'error': 'Failed to calculate route', 'message': str(e)}), 500
 
 def get_graphhopper_route(points):
     """Get route from GraphHopper using API token"""
@@ -547,22 +563,17 @@ def get_graphhopper_route(points):
     # Get API token from environment variables or use the provided one
     api_key = os.getenv('GRAPHHOPPER_API_KEY', 'efe50280-c16b-4da6-8ddb-0e56da129ebf').strip()
     
+    if not api_key:
+        logger.error("No GraphHopper API key available")
+        return None
+    
     # GraphHopper API endpoint
     gh_url = "https://graphhopper.com/api/1/route"
     
     try:
-        # Prepare points for GraphHopper API format
-        point_params = []
-        for point in points:
-            point_params.append(f"{point['lat']},{point['lng']}")
-        
-        # Build the URL with points manually
-        request_url = f"{gh_url}?key={api_key}"
-        for point in point_params:
-            request_url += f"&point={point}"
-        
-        # Add other parameters
+        # Prepare request parameters
         params = {
+            'key': api_key,
             'vehicle': 'car',
             'locale': 'en',
             'instructions': 'true',
@@ -570,19 +581,18 @@ def get_graphhopper_route(points):
             'elevation': 'false'
         }
         
-        for key, value in params.items():
-            request_url += f"&{key}={value}"
+        # Add points as parameters
+        for point in points:
+            params.setdefault('point', []).append(f"{point['lat']},{point['lng']}")
         
-        logger.info(f"Making request to GraphHopper API with {len(point_params)} points")
-        logger.info(f"GraphHopper request URL: {request_url[:100]}...")
+        logger.info(f"Making request to GraphHopper API with {len(points)} points")
         
-        # Make the request
-        response = requests.get(request_url, timeout=20)
+        # Make the request with proper timeout
+        response = requests.get(gh_url, params=params, timeout=30)
         logger.info(f"GraphHopper API response status: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
-            logger.info(f"GraphHopper API response sample: {str(data)[:200]}...")
             
             if 'paths' in data and len(data['paths']) > 0:
                 path = data['paths'][0]
@@ -591,8 +601,8 @@ def get_graphhopper_route(points):
                     route_points = path['points']['coordinates']
                     logger.info(f"Received {len(route_points)} route points from GraphHopper API")
                     
-                    distance_km = round(path['distance'] / 1000, 2)
-                    duration_min = round(path['time'] / 60000, 0)
+                    distance_km = round(path.get('distance', 0) / 1000, 2)
+                    duration_min = round(path.get('time', 0) / 60000, 0)
                     
                     steps = []
                     if 'instructions' in path:
@@ -605,19 +615,32 @@ def get_graphhopper_route(points):
                             })
                     
                     return {
+                        'success': True,
                         'distance_km': distance_km,
                         'time_min': duration_min,
                         'points': route_points,
                         'source': 'graphhopper',
-                        'steps': steps if steps else None
+                        'steps': steps if steps else []
                     }
                 else:
                     logger.warning("No coordinates found in GraphHopper response")
             else:
-                logger.warning(f"No paths found in GraphHopper response: {data}")
+                logger.warning(f"No paths found in GraphHopper response")
         else:
-            logger.warning(f"GraphHopper API returned status {response.status_code}: {response.text}")
+            logger.warning(f"GraphHopper API returned status {response.status_code}: {response.text[:200]}")
+            
+            # Handle specific error codes
+            if response.status_code == 401:
+                logger.error("GraphHopper API authentication failed - invalid API key")
+            elif response.status_code == 429:
+                logger.warning("GraphHopper API rate limit exceeded")
+            elif response.status_code >= 500:
+                logger.warning("GraphHopper API server error")
     
+    except requests.exceptions.Timeout:
+        logger.error("GraphHopper API request timed out")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"GraphHopper API request failed: {str(e)}")
     except Exception as e:
         logger.error(f"Error calling GraphHopper API: {str(e)}")
     
@@ -625,50 +648,63 @@ def get_graphhopper_route(points):
 
 def calculate_direct_route(points):
     """Calculate a direct route between points as fallback"""
-    total_distance = 0
-    total_time = 0
-    route_points = []
-    
-    for i in range(len(points) - 1):
-        lat1, lng1 = points[i]['lat'], points[i]['lng']
-        lat2, lng2 = points[i + 1]['lat'], points[i + 1]['lng']
+    try:
+        total_distance = 0
+        total_time = 0
+        route_points = []
         
-        # Add starting point
-        route_points.append([lng1, lat1])
+        # Add first point
+        first_point = points[0]
+        route_points.append([float(first_point['lng']), float(first_point['lat'])])
         
-        # For longer segments, add a midpoint to make the route look better
-        distance = calculate_distance(lat1, lng1, lat2, lng2)
-        if distance > 50:  # If over 50km
-            mid_lat = (lat1 + lat2) / 2
-            mid_lng = (lng1 + lng2) / 2
-            route_points.append([mid_lng, mid_lat])
+        for i in range(len(points) - 1):
+            lat1, lng1 = float(points[i]['lat']), float(points[i]['lng'])
+            lat2, lng2 = float(points[i + 1]['lat']), float(points[i + 1]['lng'])
+            
+            # Calculate distance for this segment
+            segment_distance = calculate_distance(lat1, lng1, lat2, lng2)
+            
+            # For longer segments, add intermediate points to make the route look better
+            if segment_distance > 50:  # If over 50km, add midpoint
+                mid_lat = (lat1 + lat2) / 2
+                mid_lng = (lng1 + lng2) / 2
+                route_points.append([mid_lng, mid_lat])
+            
+            total_distance += segment_distance
+            
+            # Add ending point of this segment
+            route_points.append([lng2, lat2])
         
-        total_distance += distance
-        total_time += distance * 2  # Rough estimate: 2 minutes per km
-        
-        # Add ending point
-        route_points.append([lng2, lat2])
-    
-    route_data = {
-        'distance_km': round(total_distance, 2),
-        'time_min': round(total_time, 0),
-        'points': route_points,
-        'source': 'direct'
-    }
-    
-    # Enhance route with travel time information
-    if total_distance > 0:
-        # Calculate estimated travel times based on typical speeds
+        # Calculate estimated travel time based on distance and typical speeds
         if total_distance <= 5:  # Short urban distance
-            route_data['time_min'] = round(total_distance * 3, 0)  # 20 km/h (3 min/km)
+            total_time = round(total_distance * 3, 0)  # 20 km/h (3 min/km)
         elif total_distance <= 20:  # Medium urban/suburban
-            route_data['time_min'] = round(total_distance * 1.5, 0)  # 40 km/h (1.5 min/km)
+            total_time = round(total_distance * 1.5, 0)  # 40 km/h (1.5 min/km)
         elif total_distance <= 100:  # Highway/intercity
-            route_data['time_min'] = round(total_distance * 0.75, 0)  # 80 km/h (0.75 min/km)
+            total_time = round(total_distance * 0.75, 0)  # 80 km/h (0.75 min/km)
         else:  # Long distance
-            route_data['time_min'] = round(total_distance * 0.6, 0)  # 100 km/h (0.6 min/km)
-    
-    return jsonify(route_data)
+            total_time = round(total_distance * 0.6, 0)  # 100 km/h (0.6 min/km)
+        
+        route_data = {
+            'success': True,
+            'distance_km': round(total_distance, 2),
+            'time_min': int(total_time),
+            'points': route_points,
+            'source': 'direct',
+            'steps': []
+        }
+        
+        logger.info(f"Direct route calculated: {route_data['distance_km']}km, {route_data['time_min']}min")
+        
+        return jsonify(route_data)
+        
+    except Exception as e:
+        logger.error(f"Error in direct route calculation: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to calculate direct route',
+            'message': str(e)
+        }), 500
 
 def calculate_distance(lat1, lng1, lat2, lng2):
     """Calculate distance between two points using Haversine formula"""
