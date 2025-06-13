@@ -20,8 +20,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Print loaded environment variables for debugging
-ors_api_key = os.getenv('ORS_URL_API', '')
-print(f"Loaded OpenRouteService API Key: {ors_api_key[:5]}... (length: {len(ors_api_key)})")
+graphhopper_api_key = os.getenv('GRAPHHOPPER_API_KEY', '')
+print(f"Loaded GraphHopper API Key: {graphhopper_api_key[:5]}... (length: {len(graphhopper_api_key)})")
 
 # Disable heavy ML imports for memory optimization
 # import torch
@@ -560,8 +560,8 @@ def get_graphhopper_route(points):
     """Get route from GraphHopper using API token"""
     import requests
     
-    # Get API token from environment variables or use the provided one
-    api_key = os.getenv('GRAPHHOPPER_API_KEY', 'efe50280-c16b-4da6-8ddb-0e56da129ebf').strip()
+    # Get API token from environment variables
+    api_key = os.getenv('GRAPHHOPPER_API_KEY', '').strip()
     
     if not api_key:
         logger.error("No GraphHopper API key available")
@@ -578,7 +578,8 @@ def get_graphhopper_route(points):
             'locale': 'en',
             'instructions': 'true',
             'points_encoded': 'false',
-            'elevation': 'false'
+            'elevation': 'false',
+            'optimize': 'false'  # Don't optimize the order of points
         }
         
         # Add points as parameters
@@ -587,8 +588,19 @@ def get_graphhopper_route(points):
         
         logger.info(f"Making request to GraphHopper API with {len(points)} points")
         
-        # Make the request with proper timeout
-        response = requests.get(gh_url, params=params, timeout=30)
+        # Make the request with proper timeout and headers
+        headers = {
+            'User-Agent': 'WerTigo-TripPlanner/1.0',
+            'Accept': 'application/json'
+        }
+        
+        response = requests.get(
+            gh_url, 
+            params=params, 
+            headers=headers,
+            timeout=30
+        )
+        
         logger.info(f"GraphHopper API response status: {response.status_code}")
         
         if response.status_code == 200:
